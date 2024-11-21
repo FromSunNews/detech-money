@@ -10,7 +10,7 @@ import { PermissionRequest } from './components/PermissionRequest';
 import { ResultView } from './components/ResultView';
 import { MoneyDetail } from './components/MoneyDetail';
 
-const API_URL = 'http://18.183.222.84:8000';
+const API_URL = 'http://18.183.241.9:8000';
 
 const MoneyDetection = () => {
   const [permission, requestPermission] = useCameraPermissions();
