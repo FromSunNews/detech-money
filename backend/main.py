@@ -5,6 +5,10 @@ import cv2
 import torch
 from torchvision import models
 import os
+from gtts import gTTS
+import base64
+from pydantic import BaseModel
+import io
 
 app = FastAPI()
 
@@ -17,20 +21,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Định nghĩa các biến global
+# Định nghĩa class names
 class_names = ["010000", "020000", "050000", "100000", "200000", "500000"]
+
+# Thêm device config cho PyTorch
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 def get_model():
-    # Khởi tạo mô hình VGG16 với Batch Normalization
+    # Thay thế VGG16 của TensorFlow bằng VGG16 của PyTorch
     model = models.vgg16_bn()
     model.classifier[6] = torch.nn.Linear(4096, len(class_names))
     return model
 
-# Load model và weights
+# Cập nhật phần load model
 try:
     model = get_model()
-    weights_path = './best_model.pth'  # Đường dẫn đến file weights của bạn
+    weights_path = './best_model.pth'  # Đổi đuôi file weights
     
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Không tìm thấy file weights tại: {weights_path}")
@@ -48,44 +54,77 @@ except Exception as e:
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     try:
-        # Đọc ảnh từ bytes
+        # Đọc ảnh
         image_data = await file.read()
         nparr = np.frombuffer(image_data, np.uint8)
         image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Tiền xử lý ảnh
+        # Thêm các bước tiền xử lý
+        # 1. Chuẩn hóa độ sáng và màu sắc
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl,a,b))
+        image = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+        
+        # 2. Giảm nhiễu
+        image = cv2.GaussianBlur(image, (5,5), 0)
+        
+        # 3. Resize và chuẩn hóa
         image = cv2.resize(image, (112, 112))
-        image = image[:, :, ::-1]  # Chuyển BGR sang RGB
+        image = image[:, :, ::-1]  # BGR to RGB
         image = (image.transpose((2, 0, 1)) - 127.5) * 0.007843137
         
-        # Chuyển đổi sang tensor
+        # Chuyển sang tensor
         image = np.expand_dims(image, axis=0)
         image = torch.from_numpy(image.astype(np.float32))
         image = image.to(device)
         
-        # Dự đoán
+        # Dự đoán với threshold cao hơn
         with torch.no_grad():
             predictions = model(image)
             predictions = torch.nn.Softmax(dim=1)(predictions)
             predictions = predictions.cpu().detach().numpy()[0]
         
         confidence = float(np.max(predictions))
+        predicted_class = class_names[np.argmax(predictions)]
         
-        if confidence > 0.7:
-            predicted_class = class_names[np.argmax(predictions)]
-            formatted_value = f"{int(predicted_class):,}"
-            return {
-                "denomination": formatted_value,
-                "confidence": f"{confidence:.2f}"
-            }
-        else:
-            return {
-                "denomination": "Unknown",
-                "confidence": f"{confidence:.2f}"
-            }
+        # Debug - in thông tin để kiểm tra
+        print(f'Raw prediction values: {predictions}')
+        print(f'Predicted class: {predicted_class} with confidence: {confidence*100:.2f}%')
+
+        formatted_value = f"{int(predicted_class):,}"
+        return {
+            "denomination": formatted_value,
+            "confidence": f"{confidence:.2f}"
+        }
+        # # Tăng ngưỡng confidence
+        # if confidence > 0.85:  # Tăng từ 0.7 lên 0.85
+        # else:
+        #     return {
+        #         "denomination": "Unknown",
+        #         "confidence": f"{confidence:.2f}"
+        #     }
             
     except Exception as e:
         print(f"Error details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Thêm model cho request TTS
+class TTSRequest(BaseModel):
+    text: str
+
+@app.post("/api/tts")
+async def text_to_speech(request: TTSRequest):
+    try:
+        tts = gTTS(text=request.text, lang='vi', slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+        audio_content = base64.b64encode(audio_buffer.getvalue()).decode()
+        return {"audio": audio_content}
+    except Exception as e:
+        print(f"TTS Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
